@@ -1,0 +1,11 @@
+pygame==2.5.2
+pandas==2.1.3
+networkx==3.2.1
+numpy==1.26.2
+tensorflow==2.15.0
+scikit-learn==1.3.2
+matplotlib==3.8.2
+pygame-gui==0.6.9
+gymnasium==0.29.1
+stable-baselines3==2.2.1
+Pillow==10.1.0

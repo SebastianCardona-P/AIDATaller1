@@ -199,16 +199,24 @@ class PricingEnvironment(gym.Env):
         """
         Simula demanda basada en elasticidad de precio.
         Demand = base_demand * (base_price / current_price)^elasticity
+        Elasticidad más baja = más ingresos con precios altos
         """
-        elasticity = 1.5  # Elasticidad precio-demanda
+        elasticity = 0.8  # Elasticidad reducida (antes 1.5) - demanda menos sensible al precio
         price_ratio = self.base_price / (price + 1e-6)
 
         # Demanda base con algo de aleatoriedad
         base_demand = 1.0
-        noise = np.random.normal(0, 0.1)
+        noise = np.random.normal(0, 0.05)  # Menos ruido (antes 0.1)
 
-        demand = base_demand * (price_ratio ** elasticity) + noise
-        return np.clip(demand, 0.0, 2.0)
+        # Bonus por precios óptimos (no muy bajos ni muy altos)
+        optimal_ratio = 1.15  # Precio óptimo 15% sobre base
+        if 1.0 <= (price / self.base_price) <= 1.3:
+            demand_bonus = 0.1
+        else:
+            demand_bonus = 0.0
+
+        demand = base_demand * (price_ratio ** elasticity) + noise + demand_bonus
+        return np.clip(demand, 0.1, 3.0)  # Mínimo 0.1 en vez de 0.0
 
     def reset(self, seed: Optional[int] = None, options: Optional[dict] = None) -> Tuple[np.ndarray, dict]:
         """Reinicia el ambiente"""
@@ -248,23 +256,30 @@ class PricingEnvironment(gym.Env):
         self.quantity_history.append(quantity)
         self.revenue_history.append(revenue)
 
-        # Calcular reward
-        # Reward = revenue - penalización por precios extremos
-        base_revenue = self.base_price * self.product_data.avg_quantity
+        # ===== NUEVA FUNCIÓN DE RECOMPENSA MEJORADA =====
+        # Calcular revenue base para comparación justa
+        base_demand = self._simulate_demand(self.base_price)
+        base_quantity = int(self.product_data.avg_quantity * base_demand)
+        base_revenue = self.base_price * base_quantity
 
-        # Penalización por precios muy alejados del base
-        price_deviation = abs(self.current_price - self.base_price) / self.base_price
-        price_penalty = price_deviation * 0.5
+        # Reward principal: diferencia de revenue normalizada
+        revenue_diff = revenue - base_revenue
+        reward = revenue_diff / (base_revenue + 1e-6)
 
-        # Penalización por volatilidad
-        if len(self.revenue_history) > 1:
-            revenue_volatility = abs(self.revenue_history[-1] - self.revenue_history[-2]) / (base_revenue + 1e-6)
-            volatility_penalty = revenue_volatility * 0.2
-        else:
-            volatility_penalty = 0.0
+        # Bonus por mantener demanda alta
+        if demand > 0.9:
+            reward += 0.1
 
-        # Reward final
-        reward = (revenue - base_revenue) / (base_revenue + 1e-6) - price_penalty - volatility_penalty
+        # Penalización SOLO por precios extremadamente fuera de rango razonable
+        price_ratio = self.current_price / self.base_price
+        if price_ratio > 1.5 or price_ratio < 0.7:
+            # Penalización ligera solo si es muy extremo
+            extreme_penalty = (abs(price_ratio - 1.0) - 0.5) * 0.1
+            reward -= extreme_penalty
+
+        # Bonus por precios en rango óptimo (1.0 - 1.3x base)
+        if 1.0 <= price_ratio <= 1.3:
+            reward += 0.15
 
         # Incrementar paso
         self.current_step += 1
@@ -274,7 +289,8 @@ class PricingEnvironment(gym.Env):
         return self._get_observation(), reward, terminated, truncated, {
             'revenue': revenue,
             'quantity': quantity,
-            'price': self.current_price
+            'price': self.current_price,
+            'base_revenue': base_revenue
         }
 
 
@@ -438,16 +454,17 @@ class PricingVisualizer:
 
         # Predicción del agente RL
         action = agent.predict(obs)
-        # Random action
-        # action = env.action_space.sample()
         _, _, terminated, truncated, info = env.step(action)
 
-        # Guardar métricas
+        # Guardar métricas del RL
         self.revenue_history.append(info['revenue'])
         self.price_history.append(info['price'])
 
-        # Precio estático (baseline)
-        static_revenue = env.base_price * info['quantity']
+        # ===== COMPARACIÓN JUSTA CON PRECIO ESTÁTICO =====
+        # Simular demanda independiente con precio base (no usar cantidad del RL)
+        static_demand = env._simulate_demand(env.base_price)
+        static_quantity = max(1, int(np.random.poisson(env.product_data.avg_quantity * static_demand)))
+        static_revenue = env.base_price * static_quantity
         self.static_revenue_history.append(static_revenue)
 
         self.current_episode += 1
@@ -457,7 +474,7 @@ class PricingVisualizer:
             total_rl = sum(self.revenue_history)
             total_static = sum(self.static_revenue_history)
             improvement = ((total_rl - total_static) / total_static) * 100 if total_static > 0 else 0
-            print(f"✓ Episodio completado - RL: ${total_rl:.2f}, Estático: ${total_static:.2f}, Mejora: {improvement:.2f}%")
+            print(f"✓ Episodio completado - RL: ${total_rl:.2f}, Estático: ${total_static:.2f}, Mejora: {improvement:+.2f}%")
 
     def _draw_graph(self):
         """Dibuja gráfica de ingresos en tiempo real"""
